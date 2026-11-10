@@ -53,16 +53,27 @@ Finds Claude Code project folders under `~/.claude/projects/` whose original pro
 
 # Actually delete – prompts for confirmation first
 ./delete-orphaned-claude-projects.sh --delete
+
+# Also delete stored memories of projects that no longer exist (dry-run first!)
+./delete-orphaned-claude-projects.sh --include-memory
+./delete-orphaned-claude-projects.sh --include-memory --delete
 ```
 
 **What gets deleted:**
 - **Orphaned projects:** the project folder with all sessions, plus `~/.claude/session-env/<session-uuid>/` and `~/.claude/file-history/<session-uuid>/` for each session
 - **Empty project folders:** folders containing nothing but `.DS_Store` files or empty directories
 
+**Memory-only folders** (no sessions, only a `memory/` folder): since there is no `cwd` to read, the script searches the file system for a directory whose encoded path matches the folder name (e.g. `PhpstormProjects/claude_gesundheit` → `-Users-…-PhpstormProjects-claude-gesundheit`). If one is found, the project is active and the folder is skipped silently.
+
+**With `--include-memory`:**
+- Memory-only folders with no matching project directory are deleted
+- Orphaned projects are deleted completely, including their `memory/` folder
+- The dry-run lists every memory file that would be deleted, and the confirmation prompt shows an extra warning
+
 **What is never deleted automatically (listed for manual review instead):**
-- A non-empty `memory/` folder – in orphaned projects only the sessions around it are removed
-- Folders without sessions that still contain other files (typically memories)
-- Projects whose path is on an unmounted volume under `/Volumes/`
+- A non-empty `memory/` folder (unless `--include-memory` is set) – in orphaned projects only the sessions around it are removed
+- Folders without sessions that contain files besides `memory/`
+- Projects whose path is on an unmounted volume under `/Volumes/`, and folder names longer than 200 characters (Claude Code shortens those, so the path cannot be verified)
 - Projects whose `cwd` does not match the folder name
 
 **Notes:**

@@ -2,12 +2,19 @@
 # Finds Claude Code project folders whose original project directory no longer exists
 # and optionally deletes them (including related per-session data).
 # WARNING: Deleted files are not moved to trash – no recovery possible!
-# Usage: ./delete-orphaned-claude-projects.sh [--delete]
+# Usage: ./delete-orphaned-claude-projects.sh [--delete] [--include-memory]
+#   --include-memory  also delete non-empty memory/ folders of orphaned projects and
+#                     memory-only folders for which no existing project directory is found
 
 DELETE_MODE=false
-if [[ "$1" == "--delete" ]]; then
-  DELETE_MODE=true
-fi
+INCLUDE_MEMORY=false
+for arg in "$@"; do
+  case "$arg" in
+    --delete) DELETE_MODE=true ;;
+    --include-memory) INCLUDE_MEMORY=true ;;
+    *) echo "Unknown option: $arg"; echo "Usage: $(basename "$0") [--delete] [--include-memory]"; exit 1 ;;
+  esac
+done
 
 # UTF-8 locale so that multi-byte characters (e.g. umlauts) count as one character
 # when re-encoding paths the way Claude Code does.
@@ -41,6 +48,30 @@ is_effectively_empty() {
   [[ -z "$(find "$1" -type f ! -name .DS_Store -print -quit)" ]]
 }
 
+# True if the folder has a memory/ subfolder with actual files in it.
+has_memory() {
+  [[ -d "$1/memory" ]] && ! is_effectively_empty "$1/memory"
+}
+
+# Searches the file system for an existing directory whose encoded path equals the
+# given project folder name. Prints the path and returns 0 if one is found.
+# Only descends into directories whose encoded path is a prefix of the name.
+find_existing_path() {
+  local target="$1" dir="${2:-}" child enc
+  for child in "$dir"/* "$dir"/.[!.]*; do
+    [[ -d "$child" ]] || continue
+    enc="$(encode_path "$child")"
+    if [[ "$enc" == "$target" ]]; then
+      echo "$child"
+      return 0
+    fi
+    if [[ "$target" == "$enc-"* ]]; then
+      find_existing_path "$target" "$child" && return 0
+    fi
+  done
+  return 1
+}
+
 # Prints the session UUIDs belonging to a project folder (from .jsonl files and UUID directories).
 session_ids() {
   local entry name
@@ -51,8 +82,9 @@ session_ids() {
   done | sort -u
 }
 
+# Usage: delete_project <folder> <keep_memory: true|false>
 delete_project() {
-  local project="$1" id
+  local project="$1" keep_memory="$2" id
   for id in $(session_ids "$project"); do
     for extra in "$CLAUDE_DIR/session-env/$id" "$CLAUDE_DIR/file-history/$id"; do
       if [[ -e "$extra" ]]; then
@@ -65,8 +97,8 @@ delete_project() {
       fi
     done
   done
-  # A non-empty memory/ folder is never deleted automatically – only the sessions around it.
-  if [[ -d "$project/memory" ]] && ! is_effectively_empty "$project/memory"; then
+  # Without --include-memory a non-empty memory/ folder is kept – only the sessions around it go.
+  if $keep_memory && has_memory "$project"; then
     local entry
     for entry in "$project"/* "$project"/.[!.]*; do
       [[ -e "$entry" ]] || continue
@@ -93,6 +125,7 @@ delete_project() {
 
 ORPHANED=0
 EMPTY=0
+MEMORY_ONLY=0
 REVIEW=0
 REVIEW_LINES=()
 
@@ -111,11 +144,40 @@ for project in "$PROJECTS_DIR"/*/; do
       else
         echo "[DRY-RUN] Would delete empty project folder: $name"
       fi
-      delete_project "$project"
-    else
-      REVIEW=$((REVIEW + 1))
-      REVIEW_LINES+=("$name  (no sessions, contains: $(cd "$project" && find . -type f ! -name .DS_Store | sed 's|^\./||' | head -3 | tr '\n' ' '))")
+      delete_project "$project" false
+      continue
     fi
+
+    contents="$(cd "$project" && find . -type f ! -name .DS_Store | sed 's|^\./||' | head -3 | tr '\n' ' ')"
+    other_files="$(find "$project" -type f ! -name .DS_Store ! -path "$project/memory/*" -print -quit)"
+
+    if [[ -n "$other_files" ]]; then
+      REVIEW=$((REVIEW + 1))
+      REVIEW_LINES+=("$name  (no sessions, contains: $contents)")
+      continue
+    fi
+
+    # Memory-only folder: if the project still exists somewhere on disk, it is active – skip it
+    find_existing_path "$name" >/dev/null && continue
+    if [[ "$name" == -Volumes-* || ${#name} -gt 200 ]]; then
+      REVIEW=$((REVIEW + 1))
+      REVIEW_LINES+=("$name  (memory only, project path cannot be verified)")
+      continue
+    fi
+    if ! $INCLUDE_MEMORY; then
+      REVIEW=$((REVIEW + 1))
+      REVIEW_LINES+=("$name  (memory only, no existing project found – use --include-memory; contains: $contents)")
+      continue
+    fi
+
+    MEMORY_ONLY=$((MEMORY_ONLY + 1))
+    if $DELETE_MODE; then
+      echo "Memory-only folder: $name"
+    else
+      echo "[DRY-RUN] Would delete memory-only folder: $name"
+      (cd "$project" && find . -type f ! -name .DS_Store | sed 's|^\./|           · |')
+    fi
+    delete_project "$project" false
     continue
   fi
 
@@ -168,7 +230,11 @@ for project in "$PROJECTS_DIR"/*/; do
   else
     echo "[DRY-RUN] Would delete orphaned project: $matching_cwd ($size, ${#sessions[@]} session(s))"
   fi
-  delete_project "$project"
+  if $INCLUDE_MEMORY; then
+    delete_project "$project" false
+  else
+    delete_project "$project" true
+  fi
 done
 
 if [[ $REVIEW -gt 0 ]]; then
@@ -179,18 +245,29 @@ if [[ $REVIEW -gt 0 ]]; then
   done
 fi
 
-TOTAL=$((ORPHANED + EMPTY))
+TOTAL=$((ORPHANED + EMPTY + MEMORY_ONLY))
 echo ""
-echo "$ORPHANED orphaned project(s), $EMPTY empty folder(s), $REVIEW for manual review."
+if $INCLUDE_MEMORY; then
+  echo "$ORPHANED orphaned project(s), $EMPTY empty folder(s), $MEMORY_ONLY memory-only folder(s), $REVIEW for manual review."
+else
+  echo "$ORPHANED orphaned project(s), $EMPTY empty folder(s), $REVIEW for manual review."
+fi
 
 if $DELETE_MODE; then
   echo "Done."
 else
   if [[ $TOTAL -gt 0 ]]; then
     echo ""
+    if $INCLUDE_MEMORY; then
+      echo "WARNING: --include-memory is set – stored memories will be deleted as well."
+    fi
     read -r -p "Permanently delete $TOTAL project folder(s)? [y/N] " confirm
     if [[ "$confirm" =~ ^[yY]$ ]]; then
-      exec "$0" --delete
+      if $INCLUDE_MEMORY; then
+        exec "$0" --delete --include-memory
+      else
+        exec "$0" --delete
+      fi
     else
       echo "Aborted."
     fi
