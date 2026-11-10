@@ -36,7 +36,8 @@ Finds and deletes Claude Code conversation sessions that have been marked with t
 - Entries in the prompt history (`~/.claude/history.jsonl`) are left untouched
 - Files in `*/subagents/*` are excluded from the search to avoid double-counting
 - Deleted files are **not** moved to trash – no recovery possible
-- Passing `--delete` directly skips the interactive prompt (safe for scripting/cron)
+- Confirming the dry-run prompt deletes exactly the sessions shown in the preview – a session marked after the preview is skipped (all checks are repeated before deleting)
+- Passing `--delete` directly skips the interactive prompt (safe for scripting/cron) and deletes whatever is marked at that moment
 
 ### `delete-orphaned-claude-projects.sh`
 
@@ -81,7 +82,8 @@ Finds Claude Code project folders under `~/.claude/projects/` whose original pro
 **Notes:**
 - Entries in `~/.claude.json` and the prompt history (`~/.claude/history.jsonl`) are left untouched
 - Deleted files are **not** moved to trash – no recovery possible
-- Passing `--delete` directly skips the interactive prompt (safe for scripting/cron)
+- Confirming the dry-run prompt deletes exactly the folders shown in the preview – a folder that only became deletable after the preview is skipped (all checks are repeated before deleting)
+- Passing `--delete` directly skips the interactive prompt (safe for scripting/cron) and deletes whatever qualifies at that moment
 
 ## Built-in alternatives in Claude Code
 

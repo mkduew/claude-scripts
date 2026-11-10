@@ -110,6 +110,7 @@ has_live_session() {
 # Usage: delete_project <folder> <keep_memory: true|false>
 delete_project() {
   local project="$1" keep_memory="$2" id
+  $DELETE_MODE || PREVIEWED+=("$project")
   for id in $(session_ids "$project"); do
     for extra in "$CLAUDE_DIR/session-env/$id" "$CLAUDE_DIR/file-history/$id"; do
       if [[ -e "$extra" ]]; then
@@ -148,168 +149,183 @@ delete_project() {
   fi
 }
 
-ORPHANED=0
-EMPTY=0
-MEMORY_ONLY=0
-REVIEW=0
-REVIEW_LINES=()
-
+# Scans all project folders and deletes (or previews) the deletable ones.
+# With FILTER=true only folders listed in APPROVED are touched, so confirming a
+# preview never deletes a folder that only became deletable after the preview.
+FILTER=false
+APPROVED=""
+PREVIEWED=()
 shopt -s nullglob
-for project in "$PROJECTS_DIR"/*/; do
-  project="${project%/}"
-  name="$(basename "$project")"
-  sessions=("$project"/*.jsonl)
+scan() {
+  ORPHANED=0
+  EMPTY=0
+  MEMORY_ONLY=0
+  REVIEW=0
+  REVIEW_LINES=()
 
-  # Case 1: no session files at all
-  if [[ ${#sessions[@]} -eq 0 ]]; then
-    if is_effectively_empty "$project"; then
-      EMPTY=$((EMPTY + 1))
+  for project in "$PROJECTS_DIR"/*/; do
+    project="${project%/}"
+    if $FILTER && ! grep -qxF -- "$project" <<< "$APPROVED"; then
+      continue
+    fi
+    name="$(basename "$project")"
+    sessions=("$project"/*.jsonl)
+
+    # Case 1: no session files at all
+    if [[ ${#sessions[@]} -eq 0 ]]; then
+      if is_effectively_empty "$project"; then
+        EMPTY=$((EMPTY + 1))
+        if $DELETE_MODE; then
+          echo "Empty project folder: $name"
+        else
+          echo "[DRY-RUN] Would delete empty project folder: $name"
+        fi
+        delete_project "$project" false
+        continue
+      fi
+
+      contents="$(cd "$project" && find . -type f ! -name .DS_Store | sed 's|^\./||' | head -3 | tr '\n' ' ')"
+      other_files="$(find "$project" -type f ! -name .DS_Store ! -path "$project/memory/*" -print -quit)"
+
+      if [[ -n "$other_files" ]]; then
+        REVIEW=$((REVIEW + 1))
+        REVIEW_LINES+=("$name  (no sessions, contains: $contents)")
+        continue
+      fi
+
+      # Names longer than 200 characters are shortened by Claude Code and can never
+      # match an encoded path, so the file system search would be pointless.
+      if [[ ${#name} -gt 200 ]]; then
+        REVIEW=$((REVIEW + 1))
+        REVIEW_LINES+=("$name  (memory only, project path cannot be verified)")
+        continue
+      fi
+      # Memory-only folder: if the project still exists somewhere on disk, it is active – skip it
+      find_existing_path "$name" >/dev/null && continue
+      if [[ "$name" == -Volumes-* ]]; then
+        REVIEW=$((REVIEW + 1))
+        REVIEW_LINES+=("$name  (memory only, project path cannot be verified)")
+        continue
+      fi
+      if ! $INCLUDE_MEMORY; then
+        REVIEW=$((REVIEW + 1))
+        REVIEW_LINES+=("$name  (memory only, no existing project found – use --include-memory; contains: $contents)")
+        continue
+      fi
+
+      MEMORY_ONLY=$((MEMORY_ONLY + 1))
       if $DELETE_MODE; then
-        echo "Empty project folder: $name"
+        echo "Memory-only folder: $name"
       else
-        echo "[DRY-RUN] Would delete empty project folder: $name"
+        echo "[DRY-RUN] Would delete memory-only folder: $name"
+        (cd "$project" && find . -type f ! -name .DS_Store | sed 's|^\./|           · |')
       fi
       delete_project "$project" false
       continue
     fi
 
-    contents="$(cd "$project" && find . -type f ! -name .DS_Store | sed 's|^\./||' | head -3 | tr '\n' ' ')"
-    other_files="$(find "$project" -type f ! -name .DS_Store ! -path "$project/memory/*" -print -quit)"
+    # Case 2: sessions exist – determine the original project path from "cwd"
+    cwds=()
+    for s in "${sessions[@]}"; do
+      c="$(session_cwd "$s")"
+      [[ -n "$c" ]] && cwds+=("$c")
+    done
 
-    if [[ -n "$other_files" ]]; then
+    if [[ ${#cwds[@]} -eq 0 ]]; then
       REVIEW=$((REVIEW + 1))
-      REVIEW_LINES+=("$name  (no sessions, contains: $contents)")
-      continue
-    fi
-
-    # Names longer than 200 characters are shortened by Claude Code and can never
-    # match an encoded path, so the file system search would be pointless.
-    if [[ ${#name} -gt 200 ]]; then
-      REVIEW=$((REVIEW + 1))
-      REVIEW_LINES+=("$name  (memory only, project path cannot be verified)")
-      continue
-    fi
-    # Memory-only folder: if the project still exists somewhere on disk, it is active – skip it
-    find_existing_path "$name" >/dev/null && continue
-    if [[ "$name" == -Volumes-* ]]; then
-      REVIEW=$((REVIEW + 1))
-      REVIEW_LINES+=("$name  (memory only, project path cannot be verified)")
-      continue
-    fi
-    if ! $INCLUDE_MEMORY; then
-      REVIEW=$((REVIEW + 1))
-      REVIEW_LINES+=("$name  (memory only, no existing project found – use --include-memory; contains: $contents)")
+      REVIEW_LINES+=("$name  (sessions without cwd information)")
       continue
     fi
 
-    MEMORY_ONLY=$((MEMORY_ONLY + 1))
+    exists=false
+    matching_cwd=""
+    unmounted=""
+    for c in "${cwds[@]}"; do
+      if [[ -d "$c" ]]; then
+        exists=true
+        break
+      fi
+      if [[ "$c" == /Volumes/* ]]; then
+        vol="/Volumes/$(echo "${c#/Volumes/}" | cut -d/ -f1)"
+        [[ -d "$vol" ]] || unmounted="$vol"
+      fi
+      [[ "$(encode_path "$c")" == "$name" ]] && matching_cwd="$c"
+    done
+
+    $exists && continue
+
+    if [[ -n "$unmounted" ]]; then
+      REVIEW=$((REVIEW + 1))
+      REVIEW_LINES+=("$name  (volume not mounted: $unmounted)")
+      continue
+    fi
+
+    if [[ -z "$matching_cwd" ]]; then
+      REVIEW=$((REVIEW + 1))
+      REVIEW_LINES+=("$name  (path not found, but folder name does not match: ${cwds[0]})")
+      continue
+    fi
+
+    if has_live_session "$project"; then
+      REVIEW=$((REVIEW + 1))
+      REVIEW_LINES+=("$name  (a session is still running – close it first: $matching_cwd)")
+      continue
+    fi
+
+    ORPHANED=$((ORPHANED + 1))
+    size="$(du -sh "$project" | cut -f1 | tr -d ' ')"
     if $DELETE_MODE; then
-      echo "Memory-only folder: $name"
+      echo "Orphaned project: $matching_cwd ($size, ${#sessions[@]} session(s))"
     else
-      echo "[DRY-RUN] Would delete memory-only folder: $name"
-      (cd "$project" && find . -type f ! -name .DS_Store | sed 's|^\./|           · |')
+      echo "[DRY-RUN] Would delete orphaned project: $matching_cwd ($size, ${#sessions[@]} session(s))"
     fi
-    delete_project "$project" false
-    continue
-  fi
-
-  # Case 2: sessions exist – determine the original project path from "cwd"
-  cwds=()
-  for s in "${sessions[@]}"; do
-    c="$(session_cwd "$s")"
-    [[ -n "$c" ]] && cwds+=("$c")
+    if $INCLUDE_MEMORY; then
+      delete_project "$project" false
+    else
+      delete_project "$project" true
+    fi
   done
 
-  if [[ ${#cwds[@]} -eq 0 ]]; then
-    REVIEW=$((REVIEW + 1))
-    REVIEW_LINES+=("$name  (sessions without cwd information)")
-    continue
+  if [[ $REVIEW -gt 0 ]]; then
+    echo ""
+    echo "Not deleted – please review manually:"
+    for line in "${REVIEW_LINES[@]}"; do
+      echo "  $line"
+    done
   fi
 
-  exists=false
-  matching_cwd=""
-  unmounted=""
-  for c in "${cwds[@]}"; do
-    if [[ -d "$c" ]]; then
-      exists=true
-      break
-    fi
-    if [[ "$c" == /Volumes/* ]]; then
-      vol="/Volumes/$(echo "${c#/Volumes/}" | cut -d/ -f1)"
-      [[ -d "$vol" ]] || unmounted="$vol"
-    fi
-    [[ "$(encode_path "$c")" == "$name" ]] && matching_cwd="$c"
-  done
-
-  $exists && continue
-
-  if [[ -n "$unmounted" ]]; then
-    REVIEW=$((REVIEW + 1))
-    REVIEW_LINES+=("$name  (volume not mounted: $unmounted)")
-    continue
-  fi
-
-  if [[ -z "$matching_cwd" ]]; then
-    REVIEW=$((REVIEW + 1))
-    REVIEW_LINES+=("$name  (path not found, but folder name does not match: ${cwds[0]})")
-    continue
-  fi
-
-  if has_live_session "$project"; then
-    REVIEW=$((REVIEW + 1))
-    REVIEW_LINES+=("$name  (a session is still running – close it first: $matching_cwd)")
-    continue
-  fi
-
-  ORPHANED=$((ORPHANED + 1))
-  size="$(du -sh "$project" | cut -f1 | tr -d ' ')"
-  if $DELETE_MODE; then
-    echo "Orphaned project: $matching_cwd ($size, ${#sessions[@]} session(s))"
-  else
-    echo "[DRY-RUN] Would delete orphaned project: $matching_cwd ($size, ${#sessions[@]} session(s))"
-  fi
-  if $INCLUDE_MEMORY; then
-    delete_project "$project" false
-  else
-    delete_project "$project" true
-  fi
-done
-
-if [[ $REVIEW -gt 0 ]]; then
+  TOTAL=$((ORPHANED + EMPTY + MEMORY_ONLY))
   echo ""
-  echo "Not deleted – please review manually:"
-  for line in "${REVIEW_LINES[@]}"; do
-    echo "  $line"
-  done
-fi
+  if $INCLUDE_MEMORY; then
+    echo "$ORPHANED orphaned project(s), $EMPTY empty folder(s), $MEMORY_ONLY memory-only folder(s), $REVIEW for manual review."
+  else
+    echo "$ORPHANED orphaned project(s), $EMPTY empty folder(s), $REVIEW for manual review."
+  fi
+}
 
-TOTAL=$((ORPHANED + EMPTY + MEMORY_ONLY))
-echo ""
-if $INCLUDE_MEMORY; then
-  echo "$ORPHANED orphaned project(s), $EMPTY empty folder(s), $MEMORY_ONLY memory-only folder(s), $REVIEW for manual review."
-else
-  echo "$ORPHANED orphaned project(s), $EMPTY empty folder(s), $REVIEW for manual review."
-fi
+scan
 
 if $DELETE_MODE; then
   echo "Done."
-else
-  if [[ $TOTAL -gt 0 ]]; then
-    echo ""
-    if $INCLUDE_MEMORY; then
-      echo "WARNING: --include-memory is set – stored memories will be deleted as well."
-    fi
-    read -r -p "Permanently delete $TOTAL project folder(s)? [y/N] " confirm
-    if [[ "$confirm" =~ ^[yY]$ ]]; then
-      if $INCLUDE_MEMORY; then
-        exec "$BASH" "$0" --delete --include-memory
-      else
-        exec "$BASH" "$0" --delete
-      fi
-    else
-      echo "Aborted."
-    fi
-  else
-    echo "Nothing to delete."
+elif [[ $TOTAL -gt 0 ]]; then
+  echo ""
+  if $INCLUDE_MEMORY; then
+    echo "WARNING: --include-memory is set – stored memories will be deleted as well."
   fi
+  read -r -p "Permanently delete $TOTAL project folder(s)? [y/N] " confirm
+  if [[ "$confirm" =~ ^[yY]$ ]]; then
+    # Delete exactly the previewed folders. Every check (path gone, running
+    # sessions, …) is repeated, so a folder that changed in the meantime is skipped.
+    echo ""
+    DELETE_MODE=true
+    FILTER=true
+    APPROVED="$(printf '%s\n' "${PREVIEWED[@]}")"
+    LIVE_IDS="$(live_session_ids)"
+    scan
+    echo "Done."
+  else
+    echo "Aborted."
+  fi
+else
+  echo "Nothing to delete."
 fi
