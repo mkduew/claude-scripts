@@ -24,9 +24,15 @@ Finds and deletes Claude Code conversation sessions that have been marked with t
 
 **What gets deleted:**
 - The `.jsonl` session file itself
-- The matching directory `<session-uuid>/` if it exists (contains subagent conversations)
+- The matching directory `~/.claude/projects/<project>/<session-uuid>/` if it exists (contains `subagents/`, `tool-results/`, etc.)
+- `~/.claude/session-env/<session-uuid>/` if it exists
+- `~/.claude/file-history/<session-uuid>/` if it exists
 
 **Notes:**
+- Only the **most recent** custom title counts: a session renamed to `TODELETE` and later renamed to something else is kept
+- Mentions of `TODELETE` inside conversation content (e.g. quoted JSON) are ignored – only real `custom-title` entries match
+- Files whose name is not a session UUID are skipped
+- Entries in the prompt history (`~/.claude/history.jsonl`) are left untouched
 - Files in `*/subagents/*` are excluded from the search to avoid double-counting
 - Deleted files are **not** moved to trash – no recovery possible
 - Passing `--delete` directly skips the interactive prompt (safe for scripting/cron)
