@@ -82,6 +82,29 @@ session_ids() {
   done | sort -u
 }
 
+# Prints the IDs of sessions that are currently running. Claude Code registers every
+# running session in ~/.claude/sessions/<pid>.json; entries can outlive a crash, so the
+# process must still be alive.
+live_session_ids() {
+  local f pid sid
+  for f in "$CLAUDE_DIR"/sessions/*.json; do
+    [[ -f "$f" ]] || continue
+    pid="$(grep -oE '"pid"[[:space:]]*:[[:space:]]*[0-9]+' "$f" | head -n 1 | grep -oE '[0-9]+$')"
+    sid="$(grep -oE '"sessionId"[[:space:]]*:[[:space:]]*"[^"]*"' "$f" | head -n 1 | sed -E 's/.*"([^"]*)"$/\1/')"
+    [[ -n "$pid" && -n "$sid" ]] && kill -0 "$pid" 2>/dev/null && echo "$sid"
+  done
+}
+LIVE_IDS="$(live_session_ids)"
+
+# True if any session of the project folder is currently running.
+has_live_session() {
+  local id
+  for id in $(session_ids "$1"); do
+    grep -qxF -- "$id" <<< "$LIVE_IDS" && return 0
+  done
+  return 1
+}
+
 # Usage: delete_project <folder> <keep_memory: true|false>
 delete_project() {
   local project="$1" keep_memory="$2" id
@@ -220,6 +243,12 @@ for project in "$PROJECTS_DIR"/*/; do
   if [[ -z "$matching_cwd" ]]; then
     REVIEW=$((REVIEW + 1))
     REVIEW_LINES+=("$name  (path not found, but folder name does not match: ${cwds[0]})")
+    continue
+  fi
+
+  if has_live_session "$project"; then
+    REVIEW=$((REVIEW + 1))
+    REVIEW_LINES+=("$name  (a session is still running – close it first: $matching_cwd)")
     continue
   fi
 

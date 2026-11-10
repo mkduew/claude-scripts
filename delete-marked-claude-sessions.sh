@@ -26,6 +26,20 @@ current_title() {
     | sed -E 's/^"customTitle"[[:space:]]*:[[:space:]]*"(.*)"$/\1/'
 }
 
+# Prints the IDs of sessions that are currently running. Claude Code registers every
+# running session in ~/.claude/sessions/<pid>.json; entries can outlive a crash, so the
+# process must still be alive.
+live_session_ids() {
+  local f pid sid
+  for f in "$CLAUDE_DIR"/sessions/*.json; do
+    [[ -f "$f" ]] || continue
+    pid="$(grep -oE '"pid"[[:space:]]*:[[:space:]]*[0-9]+' "$f" | head -n 1 | grep -oE '[0-9]+$')"
+    sid="$(grep -oE '"sessionId"[[:space:]]*:[[:space:]]*"[^"]*"' "$f" | head -n 1 | sed -E 's/.*"([^"]*)"$/\1/')"
+    [[ -n "$pid" && -n "$sid" ]] && kill -0 "$pid" 2>/dev/null && echo "$sid"
+  done
+}
+LIVE_IDS="$(live_session_ids)"
+
 # Removes a path (file or directory) if it exists, or reports it in dry-run mode.
 remove_path() {
   local path="$1" label="$2"
@@ -39,12 +53,19 @@ remove_path() {
 }
 
 FOUND=0
+SKIPPED=0
 while IFS= read -r -d '' jsonl_file; do
   [[ "$(current_title "$jsonl_file")" == "TODELETE" ]] || continue
 
   session_id="$(basename "$jsonl_file" .jsonl)"
   if [[ ! "$session_id" =~ $UUID_RE ]]; then
     echo "Skipping (unexpected file name): $jsonl_file"
+    continue
+  fi
+  # Deleting a running session would let Claude Code recreate a partial transcript.
+  if grep -qxF -- "$session_id" <<< "$LIVE_IDS"; then
+    echo "Skipping (session is still running – close it first): $jsonl_file"
+    SKIPPED=$((SKIPPED + 1))
     continue
   fi
   FOUND=$((FOUND + 1))
@@ -62,6 +83,9 @@ done < <(find "$PROJECTS_DIR" -name "*.jsonl" -not -path "*/subagents/*" -print0
 
 echo ""
 echo "$FOUND conversation(s) found."
+if [[ $SKIPPED -gt 0 ]]; then
+  echo "$SKIPPED running conversation(s) skipped – exit them and run the script again."
+fi
 
 if $DELETE_MODE; then
   echo "Done."
