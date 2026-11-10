@@ -37,6 +37,39 @@ Finds and deletes Claude Code conversation sessions that have been marked with t
 - Deleted files are **not** moved to trash – no recovery possible
 - Passing `--delete` directly skips the interactive prompt (safe for scripting/cron)
 
+### `delete-orphaned-claude-projects.sh`
+
+Finds Claude Code project folders under `~/.claude/projects/` whose original project directory no longer exists (e.g. because the project was deleted or moved) and cleans them up.
+
+**How orphans are detected:** The folder name cannot be reliably decoded back into a path, because Claude Code replaces every non-alphanumeric character (`/`, spaces, `_`, umlauts, …) with `-`. Instead, the script reads the `"cwd"` field from the session files, which holds the real original path. A project counts as orphaned only if:
+- none of its sessions' `cwd` directories exist anymore, **and**
+- re-encoding the `cwd` reproduces the folder name exactly (sanity check)
+
+**Usage:**
+
+```bash
+# Dry-run (default) – lists what would be deleted
+./delete-orphaned-claude-projects.sh
+
+# Actually delete – prompts for confirmation first
+./delete-orphaned-claude-projects.sh --delete
+```
+
+**What gets deleted:**
+- **Orphaned projects:** the project folder with all sessions, plus `~/.claude/session-env/<session-uuid>/` and `~/.claude/file-history/<session-uuid>/` for each session
+- **Empty project folders:** folders containing nothing but `.DS_Store` files or empty directories
+
+**What is never deleted automatically (listed for manual review instead):**
+- A non-empty `memory/` folder – in orphaned projects only the sessions around it are removed
+- Folders without sessions that still contain other files (typically memories)
+- Projects whose path is on an unmounted volume under `/Volumes/`
+- Projects whose `cwd` does not match the folder name
+
+**Notes:**
+- Entries in `~/.claude.json` and the prompt history (`~/.claude/history.jsonl`) are left untouched
+- Deleted files are **not** moved to trash – no recovery possible
+- Passing `--delete` directly skips the interactive prompt (safe for scripting/cron)
+
 ## Conventions
 
 - All script output, comments, and documentation in **English**
