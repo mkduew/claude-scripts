@@ -4,9 +4,12 @@
 # Usage: ./delete-marked-claude-sessions.sh [--delete]
 
 DELETE_MODE=false
-if [[ "$1" == "--delete" ]]; then
-  DELETE_MODE=true
-fi
+for arg in "$@"; do
+  case "$arg" in
+    --delete) DELETE_MODE=true ;;
+    *) echo "Unknown option: $arg"; echo "Usage: $(basename "$0") [--delete]"; exit 1 ;;
+  esac
+done
 
 CLAUDE_DIR="$HOME/.claude"
 PROJECTS_DIR="$CLAUDE_DIR/projects"
@@ -94,7 +97,7 @@ else
     echo ""
     read -r -p "Permanently delete $FOUND conversation(s)? [y/N] " confirm
     if [[ "$confirm" =~ ^[yY]$ ]]; then
-      exec "$0" --delete
+      exec "$BASH" "$0" --delete
     else
       echo "Aborted."
     fi

@@ -55,7 +55,9 @@ has_memory() {
 
 # Searches the file system for an existing directory whose encoded path equals the
 # given project folder name. Prints the path and returns 0 if one is found.
-# Only descends into directories whose encoded path is a prefix of the name.
+# Only descends into directories whose encoded path is a prefix of the name, so only
+# the directories along candidate paths are read (no full file system scan; macOS
+# privacy prompts can only appear if the project really lies in a protected folder).
 find_existing_path() {
   local target="$1" dir="${2:-}" child enc
   for child in "$dir"/* "$dir"/.[!.]*; do
@@ -180,9 +182,16 @@ for project in "$PROJECTS_DIR"/*/; do
       continue
     fi
 
+    # Names longer than 200 characters are shortened by Claude Code and can never
+    # match an encoded path, so the file system search would be pointless.
+    if [[ ${#name} -gt 200 ]]; then
+      REVIEW=$((REVIEW + 1))
+      REVIEW_LINES+=("$name  (memory only, project path cannot be verified)")
+      continue
+    fi
     # Memory-only folder: if the project still exists somewhere on disk, it is active – skip it
     find_existing_path "$name" >/dev/null && continue
-    if [[ "$name" == -Volumes-* || ${#name} -gt 200 ]]; then
+    if [[ "$name" == -Volumes-* ]]; then
       REVIEW=$((REVIEW + 1))
       REVIEW_LINES+=("$name  (memory only, project path cannot be verified)")
       continue
@@ -293,9 +302,9 @@ else
     read -r -p "Permanently delete $TOTAL project folder(s)? [y/N] " confirm
     if [[ "$confirm" =~ ^[yY]$ ]]; then
       if $INCLUDE_MEMORY; then
-        exec "$0" --delete --include-memory
+        exec "$BASH" "$0" --delete --include-memory
       else
-        exec "$0" --delete
+        exec "$BASH" "$0" --delete
       fi
     else
       echo "Aborted."
