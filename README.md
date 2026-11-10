@@ -70,6 +70,42 @@ Finds Claude Code project folders under `~/.claude/projects/` whose original pro
 - Deleted files are **not** moved to trash – no recovery possible
 - Passing `--delete` directly skips the interactive prompt (safe for scripting/cron)
 
+## Built-in alternatives in Claude Code
+
+Claude Code ships its own cleanup mechanisms. The scripts above complement them; they do not replace them.
+
+### Automatic cleanup: `cleanupPeriodDays`
+
+Claude Code automatically deletes sessions older than `cleanupPeriodDays` (default: **30 days**, minimum 1, set in `settings.json`). This includes subagent transcripts, `tool-results/`, `session-env/` and parts of `file-history/`. Memory files are never deleted; an empty `memory/` folder is only removed after staying empty for the whole retention period.
+
+The cleanup is purely **age-based**. It neither deletes individual sessions on demand nor cares whether a project directory still exists.
+
+### Purging a project: `claude purge`
+
+```bash
+claude purge <project-path> --dry-run   # preview
+claude purge <project-path>             # delete
+claude purge                            # interactive project list
+```
+
+Deletes all local data of one project: transcripts, `memory/`, `file-history/`, the matching lines in `~/.claude/history.jsonl` and the project entry in `~/.claude.json`.
+
+**Limitation:** if the project directory has already been deleted, `claude purge <old-path>` no longer finds the transcripts. It only removes the `~/.claude.json` entry and the prompt history.
+
+### What is missing (and why these scripts exist)
+
+| Need | Built-in | Script |
+|---|---|---|
+| Delete a single session right now | – (the `/resume` picker can rename, not delete; `claude rm` only hides background sessions) | `delete-marked-claude-sessions.sh` |
+| Clean up projects whose directory is gone | only indirectly after 30 days | `delete-orphaned-claude-projects.sh` |
+| Remove an existing project completely | `claude purge <path>` | – |
+
+### Recommended workflow
+
+- **Project still exists:** use `claude purge <path>`.
+- **Project directory already deleted:** run `./delete-orphaned-claude-projects.sh` first (removes the transcripts), then `claude purge <old-path>` (removes the `~/.claude.json` entry and the prompt history).
+- **Individual sessions:** `/rename TODELETE`, then `./delete-marked-claude-sessions.sh` – or simply wait for the automatic cleanup.
+
 ## Conventions
 
 - All script output, comments, and documentation in **English**
